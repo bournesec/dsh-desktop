@@ -1,50 +1,54 @@
 # DSH Desktop
 
-使用 Tauri 2 封装的 DeepSeek Harness 桌面客户端。应用启动时会在本机运行：
+English | [简体中文](README.zh-CN.md)
+
+A Tauri 2 desktop client for DeepSeek Harness. On startup, the application runs the following command locally:
 
 ```bash
 npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web --host 127.0.0.1 --port 3080
 ```
 
-服务就绪后，同一个桌面窗口会自动打开 `http://127.0.0.1:3080`。关闭桌面应用时，由它启动的 dsh 子进程也会一并退出。
+When the service is ready, the same desktop window opens `http://127.0.0.1:3080`. Closing the application also stops the dsh child process that it started.
 
-## 环境要求
+## Requirements
 
-- Node.js 20 或更高版本（需要包含 `npx`）
+- Node.js 20 or later, including `npx`
 - Rust stable
-- 当前平台的 Tauri 2 系统依赖
+- The Tauri 2 system dependencies for your platform
 
-首次运行时，`npx` 需要联网下载 `@deepseek-ai/dsh` 及依赖。后续启动会复用 npm 缓存。
+On the first run, `npx` requires network access to download `@deepseek-ai/dsh` and its dependencies. Later launches reuse the npm cache.
 
-## 开发运行
+## Development
 
 ```bash
 npm install
 npm run tauri:dev
 ```
 
-## 构建安装包
+## Build Installers
 
 ```bash
 npm run tauri:build
 ```
 
-产物位于 `src-tauri/target/release/bundle/`。
+Build outputs are written to `src-tauri/target/release/bundle/`.
 
-## GitHub Actions 安装包
+## GitHub Actions Artifacts
 
-推送到 `main`、创建 Pull Request 或手动运行 `Build installers` workflow 时，会分别在原生 runner 上构建：
+Pushing to `main`, opening a pull request, or manually running the `Build installers` workflow builds installers on native runners:
 
-- macOS DMG：Artifact `dsh-desktop-macos-dmg`
-- Windows NSIS EXE：Artifact `dsh-desktop-windows-exe`
+- macOS DMG: artifact `dsh-desktop-macos-dmg`
+- Windows NSIS EXE: artifact `dsh-desktop-windows-exe`
 
-构建完成后，可在对应 GitHub Actions 运行详情页的 `Artifacts` 区域下载，产物保留 14 天。
+After a successful build, download the installers from the `Artifacts` section of the corresponding GitHub Actions run. Artifacts are retained for 14 days.
 
-## 可选环境变量
+## Optional Environment Variables
 
-- `DSH_NPX_PATH`：指定 `npx` 可执行文件的绝对路径。
-- `DSH_WORKSPACE`：指定 dsh 启动时的默认工作目录；未设置时使用当前用户主目录。
+- `DSH_NPX_PATH`: absolute path to the `npx` executable.
+- `DSH_WORKSPACE`: default working directory for dsh. The current user's home directory is used when this variable is not set.
 
-应用固定监听 `127.0.0.1:3080`。若端口已被占用，启动页会显示错误，避免误连到未知本地服务。
+The application always listens on `127.0.0.1:3080`. If the port is already occupied, the startup screen reports an error instead of connecting to an unknown local service.
 
-界面与应用图标使用 `@deepseek-ai/dsh-web-frontend` 随附的 DeepSeek Harness 黑鲸鱼标识。
+## Branding
+
+The interface and application icons use the DeepSeek Harness black whale mark included with `@deepseek-ai/dsh-web-frontend`.
