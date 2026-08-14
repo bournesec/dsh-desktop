@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-14
+
+### Fixed
+
+- Apply a complete ad-hoc signature to macOS CI builds so applications downloaded from GitHub are no longer reported as damaged.
+- Verify the application signature inside every generated DMG before uploading it.
+- Support automatic Developer ID signing, Apple notarization, ticket stapling, and verification when the required GitHub Actions secrets are configured.
+
 ## [1.0.0] - 2026-08-14
 
 ### Added
@@ -22,5 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use a transparent macOS title bar to keep the desktop interface visually continuous.
 - Update the GitHub Actions runtime and artifact upload actions.
 
-[Unreleased]: https://github.com/bournesec/dsh-desktop/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/bournesec/dsh-desktop/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/bournesec/dsh-desktop/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/bournesec/dsh-desktop/releases/tag/v1.0.0
