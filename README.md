@@ -31,6 +31,15 @@ npm run tauri:build
 
 产物位于 `src-tauri/target/release/bundle/`。
 
+## GitHub Actions 安装包
+
+推送到 `main`、创建 Pull Request 或手动运行 `Build installers` workflow 时，会分别在原生 runner 上构建：
+
+- macOS DMG：Artifact `dsh-desktop-macos-dmg`
+- Windows NSIS EXE：Artifact `dsh-desktop-windows-exe`
+
+构建完成后，可在对应 GitHub Actions 运行详情页的 `Artifacts` 区域下载，产物保留 14 天。
+
 ## 可选环境变量
 
 - `DSH_NPX_PATH`：指定 `npx` 可执行文件的绝对路径。

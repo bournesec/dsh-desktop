@@ -418,9 +418,22 @@ fn default_workspace() -> PathBuf {
     env::var_os("DSH_WORKSPACE")
         .map(PathBuf::from)
         .filter(|path| path.is_dir())
-        .or_else(|| env::var_os("HOME").map(PathBuf::from))
-        .filter(|path| path.is_dir())
+        .or_else(user_home_directory)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn user_home_directory() -> Option<PathBuf> {
+    let variable_names = if cfg!(windows) {
+        ["USERPROFILE", "HOME"]
+    } else {
+        ["HOME", "USERPROFILE"]
+    };
+
+    variable_names
+        .into_iter()
+        .filter_map(env::var_os)
+        .map(PathBuf::from)
+        .find(|path| path.is_dir())
 }
 
 fn navigate_to_service(app: &AppHandle) {
