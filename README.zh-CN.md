@@ -42,6 +42,19 @@ npm run tauri:build
 
 构建成功后，可以从对应 GitHub Actions 运行详情页的 `Artifacts` 区域下载安装包。Artifact 保留 14 天。
 
+### macOS 签名与公证
+
+工作流始终至少应用完整的 ad-hoc 签名，避免从 GitHub 下载的 Apple Silicon 应用被 macOS 报告为“已损坏”。ad-hoc 构建仍可能需要在 macOS“隐私与安全性”中明确允许打开。
+
+如需发布可直接打开且不显示 Gatekeeper 警告的 DMG，请配置以下全部 GitHub Actions Secrets。工作流会自动导入 Developer ID Application 证书、签名、提交 Apple 公证、装订公证票据并验证结果：
+
+- `APPLE_CERTIFICATE`：Developer ID Application `.p12` 的 Base64 内容
+- `APPLE_CERTIFICATE_PASSWORD`：导出 `.p12` 时设置的密码
+- `KEYCHAIN_PASSWORD`：CI 临时钥匙串密码
+- `APPLE_ID`：Apple Developer 账户邮箱
+- `APPLE_PASSWORD`：Apple ID 专用密码
+- `APPLE_TEAM_ID`：Apple Developer Team ID
+
 ## 可选环境变量
 
 - `DSH_EXECUTABLE_PATH`：指定现有 `dsh` 可执行文件的绝对路径，优先级高于自动查找。

@@ -64,7 +64,102 @@ jobs:
       - name: Run Rust lints
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
-      - name: Build installer
+      - name: Detect Apple signing configuration
+        if: runner.os == 'macOS'
+        id: apple-signing
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -n "$APPLE_CERTIFICATE" && \
+                -n "$APPLE_CERTIFICATE_PASSWORD" && \
+                -n "$KEYCHAIN_PASSWORD" && \
+                -n "$APPLE_ID" && \
+                -n "$APPLE_PASSWORD" && \
+                -n "$APPLE_TEAM_ID" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Apple signing secrets are incomplete; building with an ad-hoc signature."
+          fi
+
+      - name: Import Apple Developer certificate
+        if: runner.os == 'macOS' && steps.apple-signing.outputs.available == 'true'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          certificate_path="$RUNNER_TEMP/dsh-developer-id.p12"
+          keychain_path="$RUNNER_TEMP/dsh-build.keychain-db"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+          signing_identity="$(security find-identity -v -p codesigning "$keychain_path" \
+            | awk -F '"' '/Developer ID Application/ { print $2; exit }')"
+          if [[ -z "$signing_identity" ]]; then
+            echo "No Developer ID Application identity was found in the imported certificate." >&2
+            exit 1
+          fi
+
+          echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+
+      - name: Build signed and notarized macOS installer
+        if: runner.os == 'macOS' && steps.apple-signing.outputs.available == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run tauri -- build --bundles dmg
+
+      - name: Build ad-hoc signed macOS installer
+        if: runner.os == 'macOS' && steps.apple-signing.outputs.available != 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+        run: npm run tauri -- build --bundles dmg
+
+      - name: Verify macOS application signature
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          dmg_path="$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -print -quit)"
+          mount_dir="$(mktemp -d)"
+          device="$(hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg_path" \
+            | awk 'END { print $1 }')"
+          cleanup_signature_check() {
+            hdiutil detach "$device"
+            rmdir "$mount_dir"
+          }
+          trap cleanup_signature_check EXIT
+
+          codesign --verify --deep --strict --verbose=4 "$mount_dir/DSH Desktop.app"
+          codesign -dvvv "$mount_dir/DSH Desktop.app"
+
+      - name: Verify macOS notarization ticket
+        if: runner.os == 'macOS' && steps.apple-signing.outputs.available == 'true'
+        run: xcrun stapler validate src-tauri/target/release/bundle/dmg/*.dmg
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
         run: npm run tauri -- build --bundles ${{ matrix.bundle }}
 
       - name: Upload installer
@@ -74,3 +169,7 @@ jobs:
           path: ${{ matrix.artifact_path }}
           if-no-files-found: error
           retention-days: 14
+
+      - name: Remove temporary Apple signing keychain
+        if: always() && runner.os == 'macOS' && steps.apple-signing.outputs.available == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/dsh-build.keychain-db"

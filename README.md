@@ -42,6 +42,19 @@ Pushing to `main`, opening a pull request, or manually running the `Build instal
 
 After a successful build, download the installers from the `Artifacts` section of the corresponding GitHub Actions run. Artifacts are retained for 14 days.
 
+### macOS signing and notarization
+
+The workflow always applies at least a complete ad-hoc signature so that Apple Silicon builds downloaded from GitHub are not reported as damaged. Ad-hoc builds may still need to be explicitly allowed in macOS Privacy & Security.
+
+For a public DMG that opens without a Gatekeeper warning, configure all of these GitHub Actions secrets. The workflow will then import the Developer ID Application certificate, sign the application, submit it to Apple for notarization, staple the ticket, and verify the result:
+
+- `APPLE_CERTIFICATE`: base64-encoded Developer ID Application `.p12`
+- `APPLE_CERTIFICATE_PASSWORD`: password used to export the `.p12`
+- `KEYCHAIN_PASSWORD`: temporary CI keychain password
+- `APPLE_ID`: Apple Developer account email
+- `APPLE_PASSWORD`: app-specific Apple ID password
+- `APPLE_TEAM_ID`: Apple Developer Team ID
+
 ## Optional Environment Variables
 
 - `DSH_EXECUTABLE_PATH`: absolute path to an existing `dsh` executable. This takes priority over automatic discovery.
