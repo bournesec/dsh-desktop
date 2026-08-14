@@ -2,17 +2,17 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A Tauri 2 desktop client for DeepSeek Harness. On startup, the application looks for an existing `dsh` executable and runs:
+A Tauri 2 desktop client for DeepSeek Harness. DeepSeek Harness can normally be started from a terminal with:
 
 ```bash
-dsh web --host 127.0.0.1 --port 3080
+npx @deepseek-ai/dsh web
 ```
 
-The application recognizes both a `dsh` command on `PATH` and an existing copy downloaded by `npx @deepseek-ai/dsh web`. If neither is available, it uses npm to install the latest `@deepseek-ai/dsh` release into its user-level application data directory. Later launches directly reuse that managed installation without checking for updates. When the service is ready, the same desktop window opens `http://127.0.0.1:3080`. Closing the application also stops any npm or dsh child process that it started.
+DSH Desktop handles this automatically. It first looks for a `dsh` command on `PATH`, an application-managed installation, or a copy already downloaded by npx. If none is available, it uses npm to install the latest `@deepseek-ai/dsh` release into its user-level application data directory. It then starts the resolved CLI with the `web --host 127.0.0.1 --port 3080` arguments. Later launches directly reuse the detected installation without checking for updates. When the service is ready, the same desktop window opens `http://127.0.0.1:3080`. Closing the application also stops any npm or dsh child process that it started.
 
 ## Requirements
 
-- Node.js 20 or later, including `npm`
+- Node.js 20 or later, including `npm` and `npx`
 - Rust stable
 - The Tauri 2 system dependencies for your platform
 

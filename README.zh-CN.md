@@ -2,17 +2,17 @@
 
 [English](README.md) | 简体中文
 
-使用 Tauri 2 封装的 DeepSeek Harness 桌面客户端。应用启动时会先查找已安装的 `dsh`，然后在本机运行：
+使用 Tauri 2 封装的 DeepSeek Harness 桌面客户端。通常可以在终端中通过以下命令启动 DeepSeek Harness：
 
 ```bash
-dsh web --host 127.0.0.1 --port 3080
+npx @deepseek-ai/dsh web
 ```
 
-应用既能识别 PATH 中的 `dsh` 命令，也能识别通过 `npx @deepseek-ai/dsh web` 下载的现有缓存。如果两者都不存在，应用会通过 npm 将最新版 `@deepseek-ai/dsh` 安装到用户级应用数据目录。后续启动直接复用该托管安装，不会每次联网检查更新。服务就绪后，同一个桌面窗口会自动打开 `http://127.0.0.1:3080`。关闭桌面应用时，由它启动的 npm 或 dsh 子进程也会一并退出。
+DSH Desktop 会自动完成这套流程。应用依次查找 PATH 中的 `dsh` 命令、应用托管版本以及 npx 已下载的缓存；如果都不存在，则通过 npm 将最新版 `@deepseek-ai/dsh` 安装到用户级应用数据目录。找到可用 CLI 后，应用使用 `web --host 127.0.0.1 --port 3080` 参数启动服务。后续启动直接复用检测到的版本，不会每次联网检查更新。服务就绪后，同一个桌面窗口会自动打开 `http://127.0.0.1:3080`。关闭桌面应用时，由它启动的 npm 或 dsh 子进程也会一并退出。
 
 ## 环境要求
 
-- Node.js 20 或更高版本，需要包含 `npm`
+- Node.js 20 或更高版本，需要包含 `npm` 和 `npx`
 - Rust stable
 - 当前平台的 Tauri 2 系统依赖
 
