@@ -2,21 +2,21 @@
 
 [English](README.md) | 简体中文
 
-使用 Tauri 2 封装的 DeepSeek Harness 桌面客户端。应用启动时会在本机运行：
+使用 Tauri 2 封装的 DeepSeek Harness 桌面客户端。应用启动时会先查找已安装的 `dsh`，然后在本机运行：
 
 ```bash
-npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web --host 127.0.0.1 --port 3080
+dsh web --host 127.0.0.1 --port 3080
 ```
 
-服务就绪后，同一个桌面窗口会自动打开 `http://127.0.0.1:3080`。关闭桌面应用时，由它启动的 dsh 子进程也会一并退出。
+应用既能识别 PATH 中的 `dsh` 命令，也能识别通过 `npx @deepseek-ai/dsh web` 下载的现有缓存。如果两者都不存在，应用会通过 npm 将最新版 `@deepseek-ai/dsh` 安装到用户级应用数据目录。后续启动直接复用该托管安装，不会每次联网检查更新。服务就绪后，同一个桌面窗口会自动打开 `http://127.0.0.1:3080`。关闭桌面应用时，由它启动的 npm 或 dsh 子进程也会一并退出。
 
 ## 环境要求
 
-- Node.js 20 或更高版本，需要包含 `npx`
+- Node.js 20 或更高版本，需要包含 `npm`
 - Rust stable
 - 当前平台的 Tauri 2 系统依赖
 
-首次运行时，`npx` 需要联网下载 `@deepseek-ai/dsh` 及其依赖。后续启动会复用 npm 缓存。
+首次自动安装需要联网。应用使用自身数据目录中的独立 npm 缓存，不会修改全局 npm 安装。
 
 ## 开发运行
 
@@ -44,7 +44,12 @@ npm run tauri:build
 
 ## 可选环境变量
 
-- `DSH_NPX_PATH`：指定 `npx` 可执行文件的绝对路径。
+- `DSH_EXECUTABLE_PATH`：指定现有 `dsh` 可执行文件的绝对路径，优先级高于自动查找。
+- `DSH_NPM_PATH`：指定自动安装时使用的 `npm` 可执行文件绝对路径。
+- `DSH_NODE_PATH`：指定加入子进程 `PATH` 的 `node` 可执行文件绝对路径。
+- `DSH_RUNTIME_DIR`：指定应用托管 dsh 和独立 npm 缓存所在的绝对目录。
+- `DSH_NPM_CACHE_PATH`：指定用于检测既有 npx 下载包的 npm 缓存绝对路径。
+- `DSH_NPX_PATH`：已弃用的兼容选项；应用会在其所在目录查找同级 `npm`。
 - `DSH_WORKSPACE`：指定 dsh 启动时的默认工作目录；未设置时使用当前用户主目录。
 
 应用固定监听 `127.0.0.1:3080`。若端口已被占用，启动页会显示错误，避免误连到未知本地服务。

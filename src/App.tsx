@@ -20,7 +20,7 @@ const PHASE_CONTENT: Record<ServicePhase, PhaseContent> = {
   starting: {
     eyebrow: "本地服务启动中",
     title: "正在打开 DeepSeek Harness",
-    description: "首次运行需要下载运行包，耗时会比后续启动更长。",
+    description: "优先复用系统命令或 npx 缓存，未检测到时自动安装最新版。",
   },
   ready: {
     eyebrow: "服务已就绪",

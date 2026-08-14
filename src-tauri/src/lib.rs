@@ -1,12 +1,13 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     env,
     ffi::OsString,
+    fs,
     io::{BufRead, BufReader},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -16,7 +17,8 @@ use std::{
 };
 use tauri::{AppHandle, Manager, RunEvent};
 
-const DSH_PACKAGE: &str = "@deepseek-ai/dsh@0.1.0-rc.6";
+const DSH_PACKAGE: &str = "@deepseek-ai/dsh@latest";
+const DSH_INSTALL_MARKER: &str = ".dsh-desktop-installed";
 const DSH_HOST: &str = "127.0.0.1";
 const DSH_PORT: u16 = 3080;
 const STARTUP_ATTEMPTS: usize = 120;
@@ -39,6 +41,19 @@ struct ServiceStatus {
     pid: Option<u32>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DshPackageMetadata {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug)]
+struct CachedDsh {
+    path: PathBuf,
+    version: String,
+    modified: std::time::SystemTime,
+}
+
 struct ServiceInner {
     child: Option<Child>,
     status: ServiceStatus,
@@ -58,7 +73,7 @@ impl ServiceManager {
                 status: ServiceStatus {
                     phase: ServicePhase::Starting,
                     message: "正在准备本地运行环境".to_owned(),
-                    logs: vec![format!("准备启动 {DSH_PACKAGE} web")],
+                    logs: vec!["准备检查并启动 dsh web".to_owned()],
                     pid: None,
                 },
             }),
@@ -118,6 +133,59 @@ impl ServiceManager {
         inner.child.take()
     }
 
+    fn track_child(&self, generation: u64, child: Child) -> Result<u32, Child> {
+        if self.generation.load(Ordering::Acquire) != generation {
+            return Err(child);
+        }
+
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.generation.load(Ordering::Acquire) != generation || inner.child.is_some() {
+            return Err(child);
+        }
+
+        let pid = child.id();
+        inner.status.pid = Some(pid);
+        inner.child = Some(child);
+        Ok(pid)
+    }
+
+    fn wait_for_tracked_child(&self, generation: u64) -> Result<ExitStatus, String> {
+        loop {
+            if self.generation.load(Ordering::Acquire) != generation
+                || self.shutting_down.load(Ordering::Acquire)
+            {
+                return Err("操作已取消".to_owned());
+            }
+
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(child) = inner.child.as_mut() else {
+                return Err("安装进程意外丢失".to_owned());
+            };
+
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    inner.child = None;
+                    inner.status.pid = None;
+                    return Ok(status);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    inner.child = None;
+                    inner.status.pid = None;
+                    return Err(format!("无法读取安装进程状态：{error}"));
+                }
+            }
+            drop(inner);
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     fn launch(self: &Arc<Self>, app: AppHandle) {
         self.shutting_down.store(false, Ordering::Release);
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -134,7 +202,7 @@ impl ServiceManager {
             inner.status = ServiceStatus {
                 phase: ServicePhase::Starting,
                 message: "正在检查本地端口".to_owned(),
-                logs: vec![format!("准备启动 {DSH_PACKAGE} web --port {DSH_PORT}")],
+                logs: vec![format!("准备启动 dsh web --port {DSH_PORT}")],
                 pid: None,
             };
         }
@@ -157,39 +225,21 @@ impl ServiceManager {
             return;
         }
 
-        let npx_path = match resolve_npx() {
+        let dsh_path = match self.ensure_dsh(&app, generation) {
             Some(path) => path,
             None => {
-                self.update_status(
-                    generation,
-                    ServicePhase::Failed,
-                    "未找到 npx，请先安装 Node.js",
-                );
-                self.append_log(
-                    generation,
-                    "已检查 PATH、/opt/homebrew/bin 和 /usr/local/bin，均未发现 npx",
-                );
                 return;
             }
         };
 
-        self.append_log(generation, format!("使用 npx：{}", npx_path.display()));
+        self.append_log(generation, format!("使用 dsh：{}", dsh_path.display()));
         self.update_status(generation, ServicePhase::Starting, "正在启动 dsh web");
 
-        let mut command = Command::new(&npx_path);
+        let mut command = Command::new(&dsh_path);
         command
-            .args([
-                "--yes",
-                DSH_PACKAGE,
-                "web",
-                "--host",
-                DSH_HOST,
-                "--port",
-                &DSH_PORT.to_string(),
-            ])
+            .args(["web", "--host", DSH_HOST, "--port", &DSH_PORT.to_string()])
             .current_dir(default_workspace())
-            .env("PATH", augmented_path(&npx_path))
-            .env("npm_config_yes", "true")
+            .env("PATH", augmented_path(&dsh_path))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -207,21 +257,13 @@ impl ServiceManager {
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let pid = child.id();
-
-        {
-            let mut inner = self
-                .inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if self.generation.load(Ordering::Acquire) != generation {
-                drop(inner);
+        let pid = match self.track_child(generation, child) {
+            Ok(pid) => pid,
+            Err(child) => {
                 stop_child(child);
                 return;
             }
-            inner.status.pid = Some(pid);
-            inner.child = Some(child);
-        }
+        };
 
         self.append_log(generation, format!("dsh 进程已启动，PID {pid}"));
 
@@ -267,6 +309,129 @@ impl ServiceManager {
         if let Some(child) = self.take_child() {
             stop_child(child);
         }
+    }
+
+    fn ensure_dsh(self: &Arc<Self>, app: &AppHandle, generation: u64) -> Option<PathBuf> {
+        if let Some(path) = configured_executable("DSH_EXECUTABLE_PATH") {
+            self.append_log(generation, format!("检测到指定的 dsh：{}", path.display()));
+            return Some(path);
+        }
+
+        if let Some(path) = resolve_system_dsh() {
+            self.append_log(generation, format!("检测到系统 dsh：{}", path.display()));
+            return Some(path);
+        }
+
+        let runtime_dir = match managed_runtime_dir(app) {
+            Ok(path) => path,
+            Err(error) => {
+                self.update_status(generation, ServicePhase::Failed, "无法确定 dsh 安装目录");
+                self.append_log(generation, error);
+                return None;
+            }
+        };
+
+        if let Some(path) = resolve_managed_dsh(&runtime_dir) {
+            self.append_log(generation, format!("使用已安装的 dsh：{}", path.display()));
+            return Some(path);
+        }
+
+        if let Some(cached) = resolve_npx_cached_dsh() {
+            self.append_log(
+                generation,
+                format!(
+                    "检测到 npx 缓存中的 dsh {}：{}",
+                    cached.version,
+                    cached.path.display()
+                ),
+            );
+            return Some(cached.path);
+        }
+
+        match self.install_managed_dsh(generation, &runtime_dir) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                self.update_status(generation, ServicePhase::Failed, "dsh 自动安装失败");
+                self.append_log(generation, error);
+                None
+            }
+        }
+    }
+
+    fn install_managed_dsh(
+        self: &Arc<Self>,
+        generation: u64,
+        runtime_dir: &Path,
+    ) -> Result<PathBuf, String> {
+        let npm_path = resolve_npm()
+            .ok_or_else(|| "未找到 npm，请先安装包含 npm 的 Node.js 20 或更高版本".to_owned())?;
+        let cache_dir = runtime_dir.join("npm-cache");
+
+        fs::create_dir_all(runtime_dir)
+            .map_err(|error| format!("无法创建 dsh 安装目录：{error}"))?;
+        fs::create_dir_all(&cache_dir)
+            .map_err(|error| format!("无法创建 npm 缓存目录：{error}"))?;
+
+        self.update_status(
+            generation,
+            ServicePhase::Starting,
+            "未检测到 dsh，正在安装最新版",
+        );
+        self.append_log(generation, format!("使用 npm：{}", npm_path.display()));
+        self.append_log(
+            generation,
+            format!("正在安装 {DSH_PACKAGE}，首次运行可能需要一些时间"),
+        );
+
+        let mut command = Command::new(&npm_path);
+        command
+            .args(npm_install_arguments(runtime_dir, &cache_dir))
+            .current_dir(runtime_dir)
+            .env("PATH", augmented_path(&npm_path))
+            .env("npm_config_update_notifier", "false")
+            .env("npm_config_yes", "true")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        configure_process_group(&mut command);
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("无法创建 npm 安装进程：{error}"))?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let pid = match self.track_child(generation, child) {
+            Ok(pid) => pid,
+            Err(child) => {
+                stop_child(child);
+                return Err("dsh 安装已取消".to_owned());
+            }
+        };
+
+        self.append_log(generation, format!("npm 安装进程已启动，PID {pid}"));
+        if let Some(stdout) = stdout {
+            pipe_logs(Arc::clone(self), generation, stdout, "npm");
+        }
+        if let Some(stderr) = stderr {
+            pipe_logs(Arc::clone(self), generation, stderr, "npm");
+        }
+
+        let status = self.wait_for_tracked_child(generation)?;
+        if !status.success() {
+            return Err(format!("npm 安装失败：{status}"));
+        }
+
+        let dsh_path = normalize_executable(managed_dsh_path(runtime_dir))
+            .ok_or_else(|| "npm 已完成，但安装目录中未找到 dsh 可执行文件".to_owned())?;
+        fs::write(managed_install_marker(runtime_dir), DSH_PACKAGE)
+            .map_err(|error| format!("无法写入 dsh 安装完成标记：{error}"))?;
+
+        self.append_log(
+            generation,
+            format!("dsh 最新版安装完成：{}", dsh_path.display()),
+        );
+        Ok(dsh_path)
     }
 
     fn child_exit_message(&self) -> Option<String> {
@@ -335,22 +500,117 @@ fn service_is_reachable() -> bool {
     TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
 }
 
-fn resolve_npx() -> Option<PathBuf> {
-    if let Some(configured) = env::var_os("DSH_NPX_PATH") {
-        if let Some(path) = normalize_executable(PathBuf::from(configured)) {
-            return Some(path);
+fn resolve_system_dsh() -> Option<PathBuf> {
+    find_executable_in_directories(&executable_search_directories(), dsh_executable_names())
+}
+
+fn resolve_npx_cached_dsh() -> Option<CachedDsh> {
+    let cache_dir = npm_cache_directory()?;
+    resolve_npx_cached_dsh_in(&cache_dir)
+}
+
+fn resolve_npx_cached_dsh_in(cache_dir: &Path) -> Option<CachedDsh> {
+    let entries = fs::read_dir(cache_dir.join("_npx")).ok()?;
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| cached_dsh_from_npx_entry(&entry.path()))
+        .max_by_key(|cached| cached.modified)
+}
+
+fn cached_dsh_from_npx_entry(entry_dir: &Path) -> Option<CachedDsh> {
+    let package_path = entry_dir
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("package.json");
+    let package_contents = fs::read_to_string(&package_path).ok()?;
+    let package: DshPackageMetadata = serde_json::from_str(&package_contents).ok()?;
+    if package.name != "@deepseek-ai/dsh" || package.version.trim().is_empty() {
+        return None;
+    }
+
+    let executable_name = if cfg!(windows) { "dsh.cmd" } else { "dsh" };
+    let path = normalize_executable(
+        entry_dir
+            .join("node_modules")
+            .join(".bin")
+            .join(executable_name),
+    )?;
+    let modified = package_path.metadata().ok()?.modified().ok()?;
+
+    Some(CachedDsh {
+        path,
+        version: package.version,
+        modified,
+    })
+}
+
+fn npm_cache_directory() -> Option<PathBuf> {
+    env::var_os("DSH_NPM_CACHE_PATH")
+        .or_else(|| env::var_os("npm_config_cache"))
+        .map(PathBuf::from)
+        .or_else(default_npm_cache_directory)
+        .filter(|path| path.is_absolute())
+}
+
+fn default_npm_cache_directory() -> Option<PathBuf> {
+    if cfg!(windows) {
+        env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|path| path.join("npm-cache"))
+    } else {
+        user_home_directory().map(|path| path.join(".npm"))
+    }
+}
+
+fn resolve_npm() -> Option<PathBuf> {
+    if let Some(path) = configured_executable("DSH_NPM_PATH") {
+        return Some(path);
+    }
+
+    if let Some(configured_npx) = env::var_os("DSH_NPX_PATH") {
+        let configured_npx = PathBuf::from(configured_npx);
+        if let Some(parent) = configured_npx.parent() {
+            if let Some(path) =
+                find_executable_in_directories(&[parent.to_path_buf()], npm_executable_names())
+            {
+                return Some(path);
+            }
         }
     }
 
-    let executable_names: &[&str] = if cfg!(windows) {
-        &["npx.cmd", "npx.exe", "npx"]
-    } else {
-        &["npx"]
-    };
+    find_executable_in_directories(&executable_search_directories(), npm_executable_names())
+}
 
+fn resolve_node() -> Option<PathBuf> {
+    configured_executable("DSH_NODE_PATH").or_else(|| {
+        find_executable_in_directories(&executable_search_directories(), node_executable_names())
+    })
+}
+
+fn configured_executable(variable_name: &str) -> Option<PathBuf> {
+    env::var_os(variable_name).and_then(|value| normalize_executable(PathBuf::from(value)))
+}
+
+fn find_executable_in_directories(
+    directories: &[PathBuf],
+    executable_names: &[&str],
+) -> Option<PathBuf> {
+    directories.iter().find_map(|directory| {
+        executable_names
+            .iter()
+            .find_map(|name| normalize_executable(directory.join(name)))
+    })
+}
+
+fn executable_search_directories() -> Vec<PathBuf> {
     let mut directories: Vec<PathBuf> = env::var_os("PATH")
         .map(|value| env::split_paths(&value).collect())
         .unwrap_or_default();
+
+    if let Some(home) = user_home_directory() {
+        directories.extend([home.join(".local/bin"), home.join(".npm-global/bin")]);
+    }
 
     if cfg!(target_os = "macos") {
         directories.extend([
@@ -360,16 +620,85 @@ fn resolve_npx() -> Option<PathBuf> {
         ]);
     }
 
-    for directory in directories {
-        for executable_name in executable_names {
-            let candidate = directory.join(executable_name);
-            if let Some(path) = normalize_executable(candidate) {
-                return Some(path);
-            }
-        }
+    directories
+}
+
+fn dsh_executable_names() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["dsh.cmd", "dsh.exe", "dsh"]
+    } else {
+        &["dsh"]
+    }
+}
+
+fn npm_executable_names() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["npm.cmd", "npm.exe", "npm"]
+    } else {
+        &["npm"]
+    }
+}
+
+fn node_executable_names() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["node.exe", "node"]
+    } else {
+        &["node"]
+    }
+}
+
+fn managed_runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(configured) = env::var_os("DSH_RUNTIME_DIR") {
+        return validate_runtime_dir(PathBuf::from(configured));
     }
 
-    None
+    app.path()
+        .app_local_data_dir()
+        .map(|path| path.join("dsh-runtime"))
+        .map_err(|error| format!("无法解析应用数据目录：{error}"))
+}
+
+fn validate_runtime_dir(path: PathBuf) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err("DSH_RUNTIME_DIR 必须是绝对路径".to_owned())
+    }
+}
+
+fn managed_dsh_path(runtime_dir: &Path) -> PathBuf {
+    let executable_name = if cfg!(windows) { "dsh.cmd" } else { "dsh" };
+    runtime_dir
+        .join("node_modules")
+        .join(".bin")
+        .join(executable_name)
+}
+
+fn managed_install_marker(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join(DSH_INSTALL_MARKER)
+}
+
+fn resolve_managed_dsh(runtime_dir: &Path) -> Option<PathBuf> {
+    if !managed_install_marker(runtime_dir).is_file() {
+        return None;
+    }
+
+    normalize_executable(managed_dsh_path(runtime_dir))
+}
+
+fn npm_install_arguments(runtime_dir: &Path, cache_dir: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("install"),
+        OsString::from("--prefix"),
+        runtime_dir.as_os_str().to_os_string(),
+        OsString::from("--cache"),
+        cache_dir.as_os_str().to_os_string(),
+        OsString::from("--no-save"),
+        OsString::from("--package-lock=false"),
+        OsString::from("--no-audit"),
+        OsString::from("--no-fund"),
+        OsString::from(DSH_PACKAGE),
+    ]
 }
 
 fn normalize_executable(path: PathBuf) -> Option<PathBuf> {
@@ -390,10 +719,16 @@ fn is_executable_file(path: &Path) -> bool {
     path.metadata().is_ok_and(|metadata| metadata.is_file())
 }
 
-fn augmented_path(npx_path: &Path) -> OsString {
+fn augmented_path(executable_path: &Path) -> OsString {
     let mut directories = VecDeque::new();
-    if let Some(parent) = npx_path.parent() {
+    if let Some(parent) = executable_path.parent() {
         directories.push_back(parent.to_path_buf());
+    }
+
+    if let Some(node_path) = resolve_node() {
+        if let Some(parent) = node_path.parent() {
+            directories.push_back(parent.to_path_buf());
+        }
     }
 
     if cfg!(target_os = "macos") {
@@ -526,9 +861,121 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configured_npx_path_must_point_to_a_file() {
-        let missing = PathBuf::from("/definitely/missing/npx");
+    fn configured_executable_path_must_point_to_a_file() {
+        let missing = PathBuf::from("/definitely/missing/dsh");
         assert!(!is_executable_file(&missing));
+    }
+
+    #[test]
+    fn npm_install_arguments_use_latest_package_and_isolated_directories() {
+        let runtime_dir = PathBuf::from("managed-runtime");
+        let cache_dir = runtime_dir.join("npm-cache");
+
+        let arguments = npm_install_arguments(&runtime_dir, &cache_dir);
+
+        assert_eq!(arguments[0], "install");
+        assert_eq!(arguments[2], runtime_dir.as_os_str());
+        assert_eq!(arguments[4], cache_dir.as_os_str());
+        assert!(arguments.contains(&OsString::from("--no-save")));
+        assert!(arguments.contains(&OsString::from("--package-lock=false")));
+        assert_eq!(arguments.last(), Some(&OsString::from(DSH_PACKAGE)));
+    }
+
+    #[test]
+    fn managed_runtime_override_must_be_absolute() {
+        let absolute = if cfg!(windows) {
+            PathBuf::from(r"C:\dsh-desktop-runtime")
+        } else {
+            PathBuf::from("/dsh-desktop-runtime")
+        };
+
+        assert!(validate_runtime_dir(PathBuf::from("relative/runtime")).is_err());
+        assert_eq!(validate_runtime_dir(absolute.clone()).unwrap(), absolute);
+    }
+
+    #[test]
+    fn managed_dsh_requires_a_completed_install_marker() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let runtime_dir = env::temp_dir().join(format!(
+            "dsh-desktop-managed-runtime-{}-{unique}",
+            std::process::id()
+        ));
+        let dsh_path = managed_dsh_path(&runtime_dir);
+        fs::create_dir_all(dsh_path.parent().unwrap()).unwrap();
+        fs::write(&dsh_path, "test dsh executable").unwrap();
+
+        assert!(resolve_managed_dsh(&runtime_dir).is_none());
+
+        fs::write(managed_install_marker(&runtime_dir), DSH_PACKAGE).unwrap();
+        let resolved = resolve_managed_dsh(&runtime_dir).expect("managed dsh should resolve");
+
+        assert_eq!(resolved, dsh_path.canonicalize().unwrap());
+        fs::remove_dir_all(runtime_dir).unwrap();
+    }
+
+    #[test]
+    fn npx_cached_dsh_is_detected_from_a_valid_package() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let cache_dir = env::temp_dir().join(format!(
+            "dsh-desktop-npx-cache-{}-{unique}",
+            std::process::id()
+        ));
+        let entry_dir = cache_dir.join("_npx").join("valid-entry");
+        let package_dir = entry_dir
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh");
+        let executable_name = if cfg!(windows) { "dsh.cmd" } else { "dsh" };
+        let executable = entry_dir
+            .join("node_modules")
+            .join(".bin")
+            .join(executable_name);
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"@deepseek-ai/dsh","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        fs::write(&executable, "test dsh executable").unwrap();
+
+        let cached = resolve_npx_cached_dsh_in(&cache_dir).expect("cached dsh should resolve");
+
+        assert_eq!(cached.version, "1.2.3");
+        assert_eq!(cached.path, executable.canonicalize().unwrap());
+        fs::remove_dir_all(cache_dir).unwrap();
+    }
+
+    #[test]
+    fn npx_cache_entry_with_another_package_name_is_ignored() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let cache_dir = env::temp_dir().join(format!(
+            "dsh-desktop-invalid-npx-cache-{}-{unique}",
+            std::process::id()
+        ));
+        let entry_dir = cache_dir.join("_npx").join("invalid-entry");
+        let package_dir = entry_dir
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"not-dsh","version":"1.2.3"}"#,
+        )
+        .unwrap();
+
+        assert!(resolve_npx_cached_dsh_in(&cache_dir).is_none());
+        fs::remove_dir_all(cache_dir).unwrap();
     }
 
     #[test]
